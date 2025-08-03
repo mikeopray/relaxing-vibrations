@@ -6,29 +6,55 @@ import os
 import uuid
 import tempfile
 import json
+import time
 from pathlib import Path
 
-def download_file(url, local_path, timeout=300):
-    """Download file with progress tracking"""
+def download_file(url, local_path, timeout=1200, max_retries=3):
+    """Download file with progress tracking and retry logic"""
     print(f"Downloading {url} to {local_path}")
     
-    with requests.get(url, stream=True, timeout=timeout) as response:
-        response.raise_for_status()
-        total_size = int(response.headers.get('content-length', 0))
-        
-        with open(local_path, 'wb') as file:
-            downloaded = 0
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    file.write(chunk)
-                    downloaded += len(chunk)
-                    if total_size > 0:
-                        percent = (downloaded / total_size) * 100
-                        if percent % 10 < 1:  # Log every 10%
-                            print(f"Downloaded {percent:.1f}%")
-    
-    print(f"Download complete: {local_path}")
-    return local_path
+    for attempt in range(max_retries):
+        try:
+            # Use longer timeout and larger chunks for big files
+            with requests.get(url, stream=True, timeout=(60, timeout)) as response:
+                response.raise_for_status()
+                total_size = int(response.headers.get('content-length', 0))
+                
+                print(f"File size: {total_size / (1024*1024*1024):.2f} GB" if total_size > 1024*1024*1024 
+                      else f"File size: {total_size / (1024*1024):.1f} MB")
+                
+                with open(local_path, 'wb') as file:
+                    downloaded = 0
+                    last_percent = 0
+                    
+                    # Use larger chunks for faster downloads
+                    chunk_size = 1024 * 1024  # 1MB chunks for large files
+                    
+                    for chunk in response.iter_content(chunk_size=chunk_size):
+                        if chunk:
+                            file.write(chunk)
+                            downloaded += len(chunk)
+                            
+                            if total_size > 0:
+                                percent = (downloaded / total_size) * 100
+                                # Log every 5% for large files to show progress
+                                if percent - last_percent >= 5:
+                                    print(f"Downloaded {percent:.1f}% ({downloaded / (1024*1024):.1f} MB)")
+                                    last_percent = percent
+            
+            print(f"Download complete: {local_path}")
+            return local_path
+            
+        except (requests.exceptions.Timeout, requests.exceptions.RequestException) as e:
+            print(f"Download attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                print(f"Retrying in 10 seconds...")
+                time.sleep(10)
+            else:
+                raise Exception(f"Failed to download after {max_retries} attempts: {e}")
+        except Exception as e:
+            print(f"Unexpected download error: {e}")
+            raise
 
 def parse_digitalocean_format(event):
     """Parse DigitalOcean-style FFmpeg JSON into our format"""
@@ -199,10 +225,24 @@ def handler(event):
         audio_temp = temp_dir / f"audio_{job_id}.mp3"
         output_path = workspace_dir / output_filename
         
-        # Download files
+        # Download files with timing
+        start_time = time.time()
         print("Starting downloads...")
+        
+        print("📹 Downloading video file...")
+        video_start = time.time()
         download_file(video_url, str(video_temp))
+        video_time = time.time() - video_start
+        print(f"✅ Video downloaded in {video_time:.1f} seconds")
+        
+        print("🎵 Downloading audio file...")  
+        audio_start = time.time()
         download_file(audio_url, str(audio_temp))
+        audio_time = time.time() - audio_start
+        print(f"✅ Audio downloaded in {audio_time:.1f} seconds")
+        
+        download_time = time.time() - start_time
+        print(f"📦 Total download time: {download_time:.1f} seconds")
         
         # Verify downloads
         if not video_temp.exists() or video_temp.stat().st_size == 0:
@@ -214,9 +254,12 @@ def handler(event):
         print(f"Video size: {video_temp.stat().st_size / (1024*1024):.1f} MB")
         print(f"Audio size: {audio_temp.stat().st_size / (1024*1024):.1f} MB")
         
-        # Merge video and audio
-        print("Starting FFmpeg merge...")
+        # Merge video and audio with timing
+        print("🔧 Starting FFmpeg merge...")
+        ffmpeg_start = time.time()
         merge_video_audio(str(video_temp), str(audio_temp), str(output_path), volume)
+        ffmpeg_time = time.time() - ffmpeg_start
+        print(f"✅ FFmpeg completed in {ffmpeg_time:.1f} seconds")
         
         # Verify output
         if not output_path.exists() or output_path.stat().st_size == 0:
@@ -256,6 +299,13 @@ def handler(event):
                 }
             }
         }
+        
+        # Final timing summary
+        total_time = time.time() - start_time
+        print(f"\n⏱️  TIMING SUMMARY:")
+        print(f"   Downloads: {download_time:.1f}s")
+        print(f"   FFmpeg: {ffmpeg_time:.1f}s") 
+        print(f"   Total: {total_time:.1f}s")
         
         print(f"Returning response: {json.dumps(response_data, indent=2)}")
         return response_data
