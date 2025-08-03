@@ -33,35 +33,56 @@ def download_file(url, local_path, timeout=300):
 def parse_digitalocean_format(event):
     """Parse DigitalOcean-style FFmpeg JSON into our format"""
     
+    print("Parsing DigitalOcean format...")
+    
     # Extract inputs
     inputs = event.get("inputs", [])
-    if len(inputs) < 2:
-        raise ValueError("Need at least 2 inputs (video and audio)")
+    if not inputs or len(inputs) < 2:
+        raise ValueError("DigitalOcean format requires at least 2 inputs (video and audio)")
+    
+    # Validate input structure
+    if not isinstance(inputs[0], dict) or "file_url" not in inputs[0]:
+        raise ValueError("First input must have 'file_url' field")
+    if not isinstance(inputs[1], dict) or "file_url" not in inputs[1]:
+        raise ValueError("Second input must have 'file_url' field")
     
     video_url = inputs[0]["file_url"]
     audio_url = inputs[1]["file_url"]
     
-    # Extract volume from filters
-    volume = 0.7  # default
-    filters = event.get("filters", [])
-    for filter_obj in filters:
-        filter_str = filter_obj.get("filter", "")
-        if "volume=" in filter_str:
-            # Parse volume from filter like "[1:0]volume=1[audio]"
-            import re
-            match = re.search(r'volume=([0-9.]+)', filter_str)
-            if match:
-                volume = float(match.group(1))
+    print(f"Video URL: {video_url}")
+    print(f"Audio URL: {audio_url}")
     
-    # Generate output filename
-    job_id = event.get("id", str(uuid.uuid4().hex[:8]))
+    # Extract volume from filters - exactly like DigitalOcean FFmpeg
+    volume = 1.0  # default to 1.0 (like DigitalOcean)
+    filters = event.get("filters", [])
+    
+    for filter_obj in filters:
+        if isinstance(filter_obj, dict) and "filter" in filter_obj:
+            filter_str = filter_obj["filter"]
+            print(f"Processing filter: {filter_str}")
+            
+            # Parse volume from filter like "[1:0]volume=1[audio]" or "[1:a]volume=0.7[audio]"
+            import re
+            volume_match = re.search(r'volume=([0-9]*\.?[0-9]+)', filter_str)
+            if volume_match:
+                volume = float(volume_match.group(1))
+                print(f"Extracted volume: {volume}")
+                break
+    
+    # Generate output filename from id (exactly like DigitalOcean)
+    job_id = event.get("id", f"output_{uuid.uuid4().hex[:8]}")
     output_filename = f"{job_id}.mp4"
+    
+    print(f"Job ID: {job_id}")
+    print(f"Output filename: {output_filename}")
+    print(f"Final volume: {volume}")
     
     return {
         "video_url": video_url,
         "audio_url": audio_url,
         "volume": volume,
-        "output_filename": output_filename
+        "output_filename": output_filename,
+        "job_id": job_id
     }
 
 def parse_simple_format(event):
@@ -212,22 +233,32 @@ def handler(event):
         except Exception as e:
             print(f"Warning: Failed to clean up temp files: {e}")
         
-        # Return response compatible with both formats
-        return {
+        # Return response in DigitalOcean FFmpeg format
+        response_data = {
             "success": True,
             "output_path": str(output_path),
             "output_filename": output_filename,
             "output_size_mb": round(output_size_mb, 2),
             "job_id": job_id,
-            # DigitalOcean compatibility
+            # DigitalOcean FFmpeg compatibility - exact format
             "response": {
                 "file_url": str(output_path),
                 "thumbnail_url": str(output_path),  # Same as file for compatibility
                 "duration": None,
                 "bitrate": None,
-                "filesize": round(output_size_mb, 2)
+                "filesize": round(output_size_mb, 2),
+                "metadata": {
+                    "width": None,
+                    "height": None,
+                    "duration": None,
+                    "fps": None,
+                    "codec": "h264/aac"
+                }
             }
         }
+        
+        print(f"Returning response: {json.dumps(response_data, indent=2)}")
+        return response_data
         
     except Exception as e:
         print(f"Handler error: {str(e)}")
