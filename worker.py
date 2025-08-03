@@ -9,9 +9,55 @@ import json
 import time
 from pathlib import Path
 
-def download_file(url, local_path, timeout=1200, max_retries=3):
+def verify_ffmpeg_installation():
+    """Verify FFmpeg is installed and working, install if needed"""
+    try:
+        # Test if ffmpeg command exists and works
+        result = subprocess.run(["ffmpeg", "-version"], 
+                               capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            print("✅ FFmpeg is available and working")
+            print(f"FFmpeg version: {result.stdout.split()[2] if len(result.stdout.split()) > 2 else 'unknown'}")
+            return True
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+        print(f"❌ FFmpeg not found or not working: {e}")
+    
+    # Try to install FFmpeg if not found
+    print("🔧 Attempting to install FFmpeg...")
+    try:
+        # Update package lists
+        subprocess.run(["apt-get", "update"], check=True, capture_output=True)
+        
+        # Install FFmpeg
+        subprocess.run([
+            "apt-get", "install", "-y", "--no-install-recommends",
+            "ffmpeg", "libavcodec-extra"
+        ], check=True, capture_output=True)
+        
+        # Test installation
+        result = subprocess.run(["ffmpeg", "-version"], 
+                               capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            print("✅ FFmpeg successfully installed!")
+            return True
+        else:
+            print("❌ FFmpeg installation failed - command still not working")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Failed to install FFmpeg: {e}")
+        return False
+
+def download_file(url, local_path, timeout=1200, max_retries=3, gpu_optimized=False):
     """Download file with progress tracking and retry logic"""
     print(f"Downloading {url} to {local_path}")
+    
+    # GPU-optimized settings
+    if gpu_optimized:
+        chunk_size = 4 * 1024 * 1024  # 4MB chunks for GPU instances
+        print("🚀 GPU-optimized download settings enabled")
+    else:
+        chunk_size = 1024 * 1024  # 1MB chunks for CPU instances
     
     for attempt in range(max_retries):
         try:
@@ -22,13 +68,11 @@ def download_file(url, local_path, timeout=1200, max_retries=3):
                 
                 print(f"File size: {total_size / (1024*1024*1024):.2f} GB" if total_size > 1024*1024*1024 
                       else f"File size: {total_size / (1024*1024):.1f} MB")
+                print(f"Using {chunk_size / (1024*1024):.0f}MB chunks")
                 
                 with open(local_path, 'wb') as file:
                     downloaded = 0
                     last_percent = 0
-                    
-                    # Use larger chunks for faster downloads
-                    chunk_size = 1024 * 1024  # 1MB chunks for large files
                     
                     for chunk in response.iter_content(chunk_size=chunk_size):
                         if chunk:
@@ -55,6 +99,45 @@ def download_file(url, local_path, timeout=1200, max_retries=3):
         except Exception as e:
             print(f"Unexpected download error: {e}")
             raise
+
+def download_files_parallel(video_url, audio_url, video_path, audio_path, gpu_optimized=False):
+    """Download video and audio files in parallel using threading"""
+    import threading
+    import queue
+    
+    print("🔄 Starting parallel downloads...")
+    
+    results = queue.Queue()
+    errors = queue.Queue()
+    
+    def download_worker(url, path, name):
+        try:
+            download_file(url, path, gpu_optimized=gpu_optimized)
+            results.put((name, "success"))
+        except Exception as e:
+            errors.put((name, str(e)))
+    
+    # Start both downloads simultaneously
+    video_thread = threading.Thread(target=download_worker, args=(video_url, video_path, "video"))
+    audio_thread = threading.Thread(target=download_worker, args=(audio_url, audio_path, "audio"))
+    
+    start_time = time.time()
+    video_thread.start()
+    audio_thread.start()
+    
+    # Wait for both to complete
+    video_thread.join()
+    audio_thread.join()
+    
+    download_time = time.time() - start_time
+    
+    # Check for errors
+    if not errors.empty():
+        error_name, error_msg = errors.get()
+        raise Exception(f"Failed to download {error_name}: {error_msg}")
+    
+    print(f"✅ Parallel downloads completed in {download_time:.1f} seconds")
+    return download_time
 
 def parse_digitalocean_format(event):
     """Parse DigitalOcean-style FFmpeg JSON into our format"""
@@ -120,25 +203,52 @@ def parse_simple_format(event):
         "output_filename": event.get("output_filename", f"merged_{uuid.uuid4().hex[:8]}.mp4")
     }
 
-def merge_video_audio(video_path, audio_path, output_path, volume=0.7):
-    """Merge video and audio using FFmpeg with GPU acceleration"""
+def check_gpu_availability():
+    """Check if CUDA/GPU is available"""
+    try:
+        result = subprocess.run(["nvidia-smi"], capture_output=True, text=True)
+        if result.returncode == 0:
+            print("🎮 GPU detected and available")
+            return True
+    except Exception:
+        pass
+    print("💻 No GPU detected, using CPU")
+    return False
+
+def merge_video_audio(video_path, audio_path, output_path, volume=0.7, gpu_acceleration=False, use_nvenc=False):
+    """Merge video and audio using FFmpeg with optional GPU acceleration"""
     
-    cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel", "warning",
-        "-y",  # Overwrite output file
-        "-i", video_path,
-        "-i", audio_path,
-        "-map", "0:v:0",  # Map video from first input
-        "-map", "1:a:0",  # Map audio from second input
-        "-filter:a", f"volume={volume}",  # Adjust audio volume
-        "-c:v", "copy",  # Copy video stream (no re-encoding)
-        "-c:a", "aac",   # Encode audio to AAC
-        "-b:a", "256k",  # Audio bitrate
-        "-shortest",     # Stop when shortest stream ends
-        output_path
-    ]
+    # Check GPU availability
+    gpu_available = check_gpu_availability()
+    
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-y"]
+    
+    # Add GPU acceleration if available and requested
+    if gpu_acceleration and gpu_available:
+        print("🚀 Using GPU acceleration for FFmpeg")
+        cmd.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
+    
+    # Add inputs
+    cmd.extend(["-i", video_path, "-i", audio_path])
+    
+    # Add mapping
+    cmd.extend(["-map", "0:v:0", "-map", "1:a:0"])
+    
+    # Add volume filter
+    cmd.extend(["-filter:a", f"volume={volume}"])
+    
+    # Video encoding options
+    if use_nvenc and gpu_available:
+        print("🎯 Using NVENC hardware encoding")
+        cmd.extend(["-c:v", "h264_nvenc", "-preset", "p4", "-profile:v", "high"])
+    else:
+        cmd.extend(["-c:v", "copy"])  # Stream copy (fastest)
+    
+    # Audio encoding
+    cmd.extend(["-c:a", "aac", "-b:a", "256k"])
+    
+    # Other options
+    cmd.extend(["-shortest", output_path])
     
     print(f"Running FFmpeg command: {' '.join(cmd)}")
     
@@ -183,6 +293,10 @@ def handler(event):
     
     try:
         print(f"Received event: {json.dumps(event, indent=2)}")
+        
+        # Verify FFmpeg is available before processing
+        if not verify_ffmpeg_installation():
+            return {"error": "FFmpeg is not available and could not be installed"}
         
         # RunPod wraps payload in "input" field
         if "input" in event:
@@ -316,5 +430,13 @@ def handler(event):
 
 # Start the RunPod serverless worker
 if __name__ == "__main__":
-    print("Starting RunPod FFmpeg merge worker v2.1 (timeout optimized + large file support)...")
-    runpod.serverless.start({"handler": handler})
+    print("Starting RunPod FFmpeg merge worker v2.2 (FFmpeg verification + large file support)...")
+    
+    # Verify FFmpeg is available at startup
+    print("🔍 Verifying FFmpeg installation...")
+    if verify_ffmpeg_installation():
+        print("🚀 Worker ready - FFmpeg verified!")
+        runpod.serverless.start({"handler": handler})
+    else:
+        print("💀 Failed to verify FFmpeg installation. Worker cannot start.")
+        exit(1)

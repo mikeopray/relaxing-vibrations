@@ -1,25 +1,37 @@
-# Base image with FFmpeg + CUDA pre-compiled
-FROM jrottenberg/ffmpeg:6.1-nvidia as ffmpeg
-
-# Minimal Python runtime
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+# Use official FFmpeg image with CUDA support
+FROM jrottenberg/ffmpeg:6.1-nvidia
 
 # Cache bust: Force rebuild when code changes
-ARG CACHE_BUST=v2.1
+ARG CACHE_BUST=v2.2
 
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 python3-pip curl && \
-    rm -rf /var/lib/apt/lists/*
 
-# Copy FFmpeg binaries from first stage
-COPY --from=ffmpeg /usr/local/bin/ /usr/local/bin/
-COPY --from=ffmpeg /usr/local/lib/ /usr/local/lib/
+# Install Python and required dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Verify FFmpeg installation and show info
+RUN ffmpeg -version && \
+    ffmpeg -encoders | grep nvenc && \
+    echo "FFmpeg with CUDA support verified!"
 
 # Install Python dependencies
 RUN pip3 install --no-cache-dir runpod requests
 
+# Create workspace directory
 WORKDIR /workspace
+
+# Copy worker script
 COPY worker.py /workspace/worker.py
+
+# Make sure FFmpeg is in PATH and executable
+ENV PATH="/usr/local/bin:$PATH"
+
+# Final verification that FFmpeg works
+RUN which ffmpeg && ffmpeg -version
 
 CMD ["python3", "/workspace/worker.py"]
