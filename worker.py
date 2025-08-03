@@ -108,40 +108,52 @@ def handler(event):
     """
     Main handler for RunPod serverless - supports both formats
     
-    DigitalOcean Format:
+    DigitalOcean Format (RunPod wraps in "input"):
     {
-        "inputs": [
-            {"file_url": "VIDEO_URL"},
-            {"file_url": "AUDIO_URL"}
-        ],
-        "filters": [
-            {"filter": "[1:0]volume=1[audio]"}
-        ],
-        "outputs": [...],
-        "id": "audio-layering"
+        "input": {
+            "inputs": [
+                {"file_url": "VIDEO_URL"},
+                {"file_url": "AUDIO_URL"}
+            ],
+            "filters": [
+                {"filter": "[1:0]volume=1[audio]"}
+            ],
+            "outputs": [...],
+            "id": "audio-layering"
+        }
     }
     
-    Simple Format:
+    Simple Format (RunPod wraps in "input"):
     {
-        "video_url": "VIDEO_URL",
-        "audio_url": "AUDIO_URL",
-        "volume": 0.7,
-        "output_filename": "output.mp4"
+        "input": {
+            "video_url": "VIDEO_URL",
+            "audio_url": "AUDIO_URL",
+            "volume": 0.7,
+            "output_filename": "output.mp4"
+        }
     }
     """
     
     try:
         print(f"Received event: {json.dumps(event, indent=2)}")
         
+        # RunPod wraps payload in "input" field
+        if "input" in event:
+            payload = event["input"]
+            print("Using RunPod wrapped input")
+        else:
+            payload = event
+            print("Using direct payload")
+        
         # Detect format and parse
-        if "inputs" in event:
+        if "inputs" in payload:
             # DigitalOcean format
             print("Detected DigitalOcean FFmpeg format")
-            params = parse_digitalocean_format(event)
+            params = parse_digitalocean_format(payload)
         else:
             # Simple format
             print("Detected simple RunPod format")
-            params = parse_simple_format(event)
+            params = parse_simple_format(payload)
         
         video_url = params["video_url"]
         audio_url = params["audio_url"]
