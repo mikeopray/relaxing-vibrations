@@ -316,5 +316,5 @@ def handler(event):
 
 # Start the RunPod serverless worker
 if __name__ == "__main__":
-    print("Starting RunPod FFmpeg merge worker (flexible format support)...")
+    print("Starting RunPod FFmpeg merge worker v2.1 (timeout optimized + large file support)...")
     runpod.serverless.start({"handler": handler})

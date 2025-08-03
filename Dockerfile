@@ -4,6 +4,9 @@ FROM jrottenberg/ffmpeg:6.1-nvidia as ffmpeg
 # Minimal Python runtime
 FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
+# Cache bust: Force rebuild when code changes
+ARG CACHE_BUST=v2.1
+
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get install -y --no-install-recommends python3 python3-pip curl && \
