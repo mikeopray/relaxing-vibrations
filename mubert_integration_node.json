@@ -1,0 +1,92 @@
+{
+  "name": "Generate 8-Minute Music from Reference Track (MusicGen)",
+  "type": "n8n-nodes-base.httpRequest",
+  "position": "Add RIGHT AFTER Leonardo AI generation",
+  "description": "PERFECT: 8-minute duration + reference audio + cheaper cost ($0.074 vs $0.096)",
+  "parameters": {
+    "method": "POST",
+    "url": "https://api.replicate.com/v1/predictions",
+    "authentication": "headerAuth", 
+    "sendHeaders": true,
+    "headerParameters": {
+      "parameters": [
+        {
+          "name": "Authorization",
+          "value": "Token YOUR_REPLICATE_API_TOKEN"
+        },
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        }
+      ]
+    },
+    "sendBody": true,
+    "bodyParameters": {
+      "parameters": [
+        {
+          "name": "version",
+          "value": "671ac645ce5e552cc63a54a2bbff63fcf798043055d2dac5fc9e36a837eedcfb"
+        },
+        {
+          "name": "input",
+          "value": {
+            "model_version": "stereo-melody-large",
+            "prompt": "{{ $json.prompt || '8-minute seamless looping ambient meditation music, soft instrumental, peaceful nature sounds, consistent gentle volume, no sudden changes, perfect for relaxation and sleep, instrumental only' }}",
+            "input_audio": "{{ $json.referenceTrackUrl }}",
+            "duration": 480,
+            "continuation": false,
+            "classifier_free_guidance": 5,
+            "temperature": 0.7,
+            "top_k": 180,
+            "normalization_strategy": "loudness",
+            "output_format": "mp3"
+          }
+        }
+      ]
+    }
+  },
+  "alternatives": {
+    "ace_step_audio_to_audio": {
+      "url": "https://fal.run/fal-ai/ace-step/audio-to-audio",
+      "quality_elo": "unknown",
+      "cost": "$0.096 per 8-minute track",
+      "note": "Alternative reference audio option but NO duration control - limited usefulness"
+    },
+    "stable_audio_text_only": {
+      "url": "https://fal.run/fal-ai/stable-audio",
+      "quality_elo": 919,
+      "cost": "$0.058 per 8-minute track",
+      "note": "Higher quality but no reference audio support - text prompts only"
+    },
+    "lyria2_premium": {
+      "url": "https://fal.run/fal-ai/lyria2",
+      "quality_elo": 1000,
+      "cost": "$1.60 per 8-minute track",
+      "note": "Highest quality but expensive and no reference audio capability"
+    }
+  },
+  "setup_instructions": [
+    "1. Go to https://replicate.com/account/api-tokens and get API token",
+    "2. Identify your top 3-5 performing videos from YouTube Analytics",  
+    "3. Extract 30-60 second audio samples: youtube-dl + ffmpeg",
+    "4. Upload reference tracks to accessible URLs (Google Drive public links work)",
+    "5. Set prompt (describe desired style) and referenceTrackUrl in n8n workflow",
+    "6. Test in Replicate playground first: duration=480, continuation=false",
+    "7. Cost: $0.074 flat fee per track regardless of duration (very affordable)"
+  ],
+  "optimal_settings_explained": [
+    "classifier_free_guidance=5: Strong adherence to reference audio (vs default 3)",
+    "temperature=0.7: More predictable/consistent output (vs default 1.0)", 
+    "top_k=180: More conservative sampling for peaceful sounds (vs default 250)",
+    "normalization_strategy=loudness: Consistent volume across devices",
+    "prompt emphasizes: 'seamless looping', 'consistent volume', 'no sudden changes'"
+  ],
+  "notes": [
+    "MusicGen: PERFECT solution - 8-minute duration + reference audio + optimal settings",
+    "Cost: $0.074 flat fee (23% cheaper than ACE-Step, works regardless of duration)",
+    "Quality: 819 ELO (rank #6 on leaderboard) - proven Meta model",
+    "Settings optimized for seamless 8-minute ambient tracks that loop to 3 hours",
+    "Continuation=false: Mimics reference audio style rather than continuing it",
+    "Test with 1-minute duration first, then scale to full 8-minute production"
+  ]
+}
