@@ -10,42 +10,27 @@ import time
 from pathlib import Path
 
 def verify_ffmpeg_installation():
-    """Verify FFmpeg is installed and working, install if needed"""
+    """Verify FFmpeg is available - safe version that won't crash worker"""
     try:
         # Test if ffmpeg command exists and works
         result = subprocess.run(["ffmpeg", "-version"], 
                                capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
             print("✅ FFmpeg is available and working")
-            print(f"FFmpeg version: {result.stdout.split()[2] if len(result.stdout.split()) > 2 else 'unknown'}")
-            return True
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
-        print(f"❌ FFmpeg not found or not working: {e}")
-    
-    # Try to install FFmpeg if not found
-    print("🔧 Attempting to install FFmpeg...")
-    try:
-        # Update package lists
-        subprocess.run(["apt-get", "update"], check=True, capture_output=True)
-        
-        # Install FFmpeg
-        subprocess.run([
-            "apt-get", "install", "-y", "--no-install-recommends",
-            "ffmpeg", "libavcodec-extra"
-        ], check=True, capture_output=True)
-        
-        # Test installation
-        result = subprocess.run(["ffmpeg", "-version"], 
-                               capture_output=True, text=True, timeout=10)
-        if result.returncode == 0:
-            print("✅ FFmpeg successfully installed!")
+            version_info = result.stdout.split('\n')[0] if result.stdout else "unknown version"
+            print(f"FFmpeg: {version_info}")
             return True
         else:
-            print("❌ FFmpeg installation failed - command still not working")
+            print("❌ FFmpeg command failed")
             return False
-            
+    except FileNotFoundError:
+        print("❌ FFmpeg command not found")
+        return False
+    except subprocess.TimeoutExpired:
+        print("❌ FFmpeg version check timed out")
+        return False
     except Exception as e:
-        print(f"❌ Failed to install FFmpeg: {e}")
+        print(f"❌ FFmpeg verification error: {e}")
         return False
 
 def download_file(url, local_path, timeout=1200, max_retries=3, gpu_optimized=False):
@@ -182,25 +167,47 @@ def parse_digitalocean_format(event):
     job_id = event.get("id", f"output_{uuid.uuid4().hex[:8]}")
     output_filename = f"{job_id}.mp4"
     
+    # Extract GPU settings from DigitalOcean format
+    gpu_acceleration = event.get("gpu_acceleration", True)  # Default to GPU
+    use_nvenc = event.get("use_nvenc", True)  # Default to NVENC
+    gpu_optimized = event.get("gpu_optimized", True)  # Default to GPU downloads
+    
+    # Check for GPU hints in outputs array
+    outputs = event.get("outputs", [])
+    for output in outputs:
+        if isinstance(output, dict):
+            if "codec" in output and "nvenc" in output["codec"]:
+                use_nvenc = True
+            if "preset" in output and output["preset"] in ["p1", "p2", "p3", "p4"]:
+                gpu_acceleration = True
+    
     print(f"Job ID: {job_id}")
     print(f"Output filename: {output_filename}")
     print(f"Final volume: {volume}")
+    print(f"GPU acceleration: {gpu_acceleration}")
+    print(f"NVENC encoding: {use_nvenc}")
     
     return {
         "video_url": video_url,
         "audio_url": audio_url,
         "volume": volume,
         "output_filename": output_filename,
-        "job_id": job_id
+        "job_id": job_id,
+        "gpu_acceleration": gpu_acceleration,
+        "use_nvenc": use_nvenc,
+        "gpu_optimized": gpu_optimized
     }
 
 def parse_simple_format(event):
-    """Parse simple RunPod format"""
+    """Parse simple RunPod format with GPU acceleration support"""
     return {
         "video_url": event.get("video_url"),
         "audio_url": event.get("audio_url"),
         "volume": float(event.get("volume", 0.7)),
-        "output_filename": event.get("output_filename", f"merged_{uuid.uuid4().hex[:8]}.mp4")
+        "output_filename": event.get("output_filename", f"merged_{uuid.uuid4().hex[:8]}.mp4"),
+        "gpu_acceleration": event.get("gpu_acceleration", True),  # Default to GPU acceleration
+        "use_nvenc": event.get("use_nvenc", True),  # Default to NVENC encoding
+        "gpu_optimized": event.get("gpu_optimized", True)  # Default to GPU-optimized downloads
     }
 
 def check_gpu_availability():
@@ -223,10 +230,15 @@ def merge_video_audio(video_path, audio_path, output_path, volume=0.7, gpu_accel
     
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-y"]
     
+    # Add performance optimizations
+    cmd.extend(["-threads", "0"])  # Use all available CPU threads
+    
     # Add GPU acceleration if available and requested
     if gpu_acceleration and gpu_available:
         print("🚀 Using GPU acceleration for FFmpeg")
         cmd.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
+        # GPU-specific optimizations
+        cmd.extend(["-gpu", "0"])  # Use first GPU
     
     # Add inputs
     cmd.extend(["-i", video_path, "-i", audio_path])
@@ -237,15 +249,23 @@ def merge_video_audio(video_path, audio_path, output_path, volume=0.7, gpu_accel
     # Add volume filter
     cmd.extend(["-filter:a", f"volume={volume}"])
     
-    # Video encoding options
+    # Video encoding options - optimized for maximum speed
     if use_nvenc and gpu_available:
-        print("🎯 Using NVENC hardware encoding")
-        cmd.extend(["-c:v", "h264_nvenc", "-preset", "p4", "-profile:v", "high"])
+        print("🎯 Using NVENC hardware encoding (fastest preset)")
+        cmd.extend([
+            "-c:v", "h264_nvenc", 
+            "-preset", "p1",  # Fastest NVENC preset (p1 = fastest)
+            "-profile:v", "high",
+            "-rc", "cbr",  # Constant bitrate for speed
+            "-b:v", "5M",  # Fixed bitrate for predictable speed
+            "-maxrate", "5M",
+            "-bufsize", "10M"
+        ])
     else:
         cmd.extend(["-c:v", "copy"])  # Stream copy (fastest)
     
-    # Audio encoding
-    cmd.extend(["-c:a", "aac", "-b:a", "256k"])
+    # Audio encoding - optimized for speed
+    cmd.extend(["-c:a", "aac", "-b:a", "256k", "-ac", "2"])
     
     # Other options
     cmd.extend(["-shortest", output_path])
@@ -294,10 +314,6 @@ def handler(event):
     try:
         print(f"Received event: {json.dumps(event, indent=2)}")
         
-        # Verify FFmpeg is available before processing
-        if not verify_ffmpeg_installation():
-            return {"error": "FFmpeg is not available and could not be installed"}
-        
         # RunPod wraps payload in "input" field
         if "input" in event:
             payload = event["input"]
@@ -320,11 +336,15 @@ def handler(event):
         audio_url = params["audio_url"]
         volume = params["volume"]
         output_filename = params["output_filename"]
+        gpu_acceleration = params.get("gpu_acceleration", True)
+        use_nvenc = params.get("use_nvenc", True)
+        gpu_optimized = params.get("gpu_optimized", True)
         
         if not video_url or not audio_url:
             return {"error": "Both video_url and audio_url are required"}
         
         print(f"Processing job - Video: {video_url}, Audio: {audio_url}, Volume: {volume}")
+        print(f"🚀 GPU Settings - Acceleration: {gpu_acceleration}, NVENC: {use_nvenc}, Optimized Downloads: {gpu_optimized}")
         
         # Create workspace directories
         workspace_dir = Path("/workspace")
@@ -345,13 +365,13 @@ def handler(event):
         
         print("📹 Downloading video file...")
         video_start = time.time()
-        download_file(video_url, str(video_temp))
+        download_file(video_url, str(video_temp), gpu_optimized=gpu_optimized)
         video_time = time.time() - video_start
         print(f"✅ Video downloaded in {video_time:.1f} seconds")
         
         print("🎵 Downloading audio file...")  
         audio_start = time.time()
-        download_file(audio_url, str(audio_temp))
+        download_file(audio_url, str(audio_temp), gpu_optimized=gpu_optimized)
         audio_time = time.time() - audio_start
         print(f"✅ Audio downloaded in {audio_time:.1f} seconds")
         
@@ -371,7 +391,14 @@ def handler(event):
         # Merge video and audio with timing
         print("🔧 Starting FFmpeg merge...")
         ffmpeg_start = time.time()
-        merge_video_audio(str(video_temp), str(audio_temp), str(output_path), volume)
+        merge_video_audio(
+            str(video_temp), 
+            str(audio_temp), 
+            str(output_path), 
+            volume,
+            gpu_acceleration=gpu_acceleration,
+            use_nvenc=use_nvenc
+        )
         ffmpeg_time = time.time() - ffmpeg_start
         print(f"✅ FFmpeg completed in {ffmpeg_time:.1f} seconds")
         
@@ -430,13 +457,19 @@ def handler(event):
 
 # Start the RunPod serverless worker
 if __name__ == "__main__":
-    print("Starting RunPod FFmpeg merge worker v2.2 (FFmpeg verification + large file support)...")
+    print("Starting RunPod FFmpeg merge worker v2.3.1 (Exit code 234 fix - stability improved)...")
     
-    # Verify FFmpeg is available at startup
+    # Verify FFmpeg is available at startup (non-blocking)
     print("🔍 Verifying FFmpeg installation...")
-    if verify_ffmpeg_installation():
-        print("🚀 Worker ready - FFmpeg verified!")
-        runpod.serverless.start({"handler": handler})
-    else:
-        print("💀 Failed to verify FFmpeg installation. Worker cannot start.")
-        exit(1)
+    try:
+        if verify_ffmpeg_installation():
+            print("🚀 Worker ready - FFmpeg verified!")
+        else:
+            print("⚠️  FFmpeg verification failed - worker will start anyway")
+            print("ℹ️  FFmpeg should be available through Docker container")
+    except Exception as e:
+        print(f"⚠️  FFmpeg verification error: {e}")
+        print("ℹ️  Starting worker anyway - FFmpeg should be available")
+    
+    print("🚀 Starting RunPod serverless handler...")
+    runpod.serverless.start({"handler": handler})

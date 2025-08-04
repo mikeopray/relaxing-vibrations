@@ -2,7 +2,7 @@
 FROM jrottenberg/ffmpeg:6.1-nvidia
 
 # Cache bust: Force rebuild when code changes
-ARG CACHE_BUST=v2.2
+ARG CACHE_BUST=v2.3.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
